@@ -1,13 +1,13 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"bufio"
 	"encoding/json"
 	"github.com/joho/godotenv"
 	"github.com/kr/pretty"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -26,14 +26,77 @@ func main() {
 		log.Fatal(err)
 	}
 
-	go func() {
-		t := time.Now()
-		genesisBlock := Block{0, t.String(), 0, "", ""}
-		pretty.Println(genesisBlock)
-		Blockchain = append(Blockchain, genesisBlock)
-	}()
+	BcServer = make(chan []Block)
+
+	t := time.Now()
+	genesisBlock := Block{0, t.String(), 0, "", ""}
+	pretty.Println(genesisBlock)
+	Blockchain = append(Blockchain, genesisBlock)
+
+	server, err := net.Listen("tcp", ":"+os.Getenv("BC_ADDR"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer server.Close()
+
+	for {
+		conn, err := server.Accept()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		go handleConn(conn)
+	}
 
 	log.Fatal(run())
+}
+
+func handleConn(conn net.Conn) {
+	defer conn.Close()
+
+	io.WriteString(conn, "Enter a new BPM:")
+
+	scanner := bufio.NewScanner(conn)
+
+	go func() {
+		for scanner.Scan() {
+			bpm, err := strconv.Atoi(scanner.Text())
+			if err != nil {
+				log.Printf("%v not a number: %v", scanner.Text(), err)
+				continue
+			}
+			oldBlock := Blockchain[len(Blockchain)-1]
+			newBlock, err := generateBlock(oldBlock, bpm)
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+			if isBlockValid(newBlock, oldBlock) {
+				newBlockchain := append(Blockchain, newBlock)
+				replaceChain(newBlockchain)
+			}
+
+			BcServer <- Blockchain
+			io.WriteString(conn, "\nEnter a new BPM:")
+		}
+	}()
+
+	go func() {
+		for {
+			time.Sleep(30 * time.Second)
+			output, err := json.Marshal(Blockchain)
+			if err != nil {
+				log.Fatal(err)
+			}
+			io.WriteString(conn, string(output))
+			io.WriteString(conn, "\n")
+		}
+	}()
+
+	for _ = range BcServer {
+		pretty.Println(Blockchain)
+	}
 }
 
 func run() error {
@@ -107,60 +170,4 @@ func respondWithJSON(w http.ResponseWriter, r *http.Request, code int, payload i
 	}
 	w.WriteHeader(code)
 	w.Write(response)
-}
-
-type Block struct {
-	Index     int
-	Timestamp string
-	BPM       int
-	Hash      string
-	PrevHash  string
-}
-
-var Blockchain []Block
-
-func calculateHash(block Block) string {
-	record := strconv.Itoa(block.Index) + block.Timestamp + strconv.Itoa(block.BPM) + block.PrevHash
-
-	h := sha256.New()
-	h.Write([]byte(record))
-	hashed := h.Sum(nil)
-
-	return hex.EncodeToString(hashed)
-}
-
-func generateBlock(oldBlock Block, BPM int) (Block, error) {
-	var newBlock Block
-
-	t := time.Now()
-
-	newBlock.Index = oldBlock.Index + 1
-	newBlock.Timestamp = t.String()
-	newBlock.BPM = BPM
-	newBlock.PrevHash = oldBlock.Hash
-	newBlock.Hash = calculateHash(newBlock)
-
-	return newBlock, nil
-}
-
-func isBlockValid(newBlock, oldBlock Block) bool {
-	if oldBlock.Index+1 != newBlock.Index {
-		return false
-	}
-
-	if oldBlock.Hash != newBlock.PrevHash {
-		return false
-	}
-
-	if calculateHash(newBlock) != newBlock.Hash {
-		return false
-	}
-
-	return true
-}
-
-func replaceChain(newBlocks []Block) {
-	if len(newBlocks) > len(Blockchain) {
-		Blockchain = newBlocks
-	}
 }
